@@ -1487,6 +1487,17 @@ static int mkv_write_attachments(AVFormatContext *s)
     return 0;
 }
 
+static int64_t get_duration(AVFormatContext *s)
+{
+    int i = 0;
+    int64_t maxDuration = 0;
+    for (i = 0; i < s->nb_streams; i++) {
+        int64_t streamDuration = s->streams[i]->duration;
+        maxDuration = FFMAX(maxDuration, streamDuration);
+    }
+    return maxDuration;
+}
+
 static int mkv_write_header(AVFormatContext *s)
 {
     MatroskaMuxContext *mkv = s->priv_data;
@@ -1590,10 +1601,12 @@ static int mkv_write_header(AVFormatContext *s)
     }
 
     // reserve space for the duration
-    mkv->duration = 0;
+    mkv->duration = get_duration(s);
     mkv->duration_offset = avio_tell(pb);
     if (!mkv->is_live) {
         put_ebml_void(pb, 11);              // assumes double-precision float to be written
+    	if (mkv->duration > 0)
+            put_ebml_float(pb, MATROSKA_ID_DURATION, mkv->duration);
     }
     end_ebml_master(pb, segment_info);
 
