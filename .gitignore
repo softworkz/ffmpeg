@@ -33,3 +33,7 @@
 /lcov/
 /src
 /mapfile
+
+ProjectGenerator_Params.txt
+/SMP
+/templates
