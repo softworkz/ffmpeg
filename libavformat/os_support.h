@@ -110,6 +110,7 @@ typedef unsigned long nfds_t;
 
 #if HAVE_WINSOCK2_H
 #include <winsock2.h>
+//#define HAVE_STRUCT_POLLFD 1
 #endif
 #if !HAVE_STRUCT_POLLFD
 struct pollfd {
