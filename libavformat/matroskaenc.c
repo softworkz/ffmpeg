@@ -1495,7 +1495,24 @@ static int64_t get_duration(AVFormatContext *s)
         int64_t streamDuration = s->streams[i]->duration;
         maxDuration = FFMAX(maxDuration, streamDuration);
     }
+
+    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration returned %d\n", maxDuration);
     return maxDuration;
+}
+
+static double get_duration2(AVFormatContext *s)
+{
+    int i = 0;
+    double max = 0.0;
+    for (i = 0; i < s->nb_streams; i++) {
+        AVDictionaryEntry *duration = av_dict_get(s->streams[i]->metadata,
+            DURATION, NULL, 0);
+        if (!duration || atof(duration->value) < 0) continue;
+        if (atof(duration->value) > max) max = atof(duration->value);
+    }
+
+    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration2 returned %d\n", max);
+    return max / 1000;
 }
 
 static int mkv_write_header(AVFormatContext *s)
