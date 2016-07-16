@@ -1497,6 +1497,7 @@ static int64_t get_duration(AVFormatContext *s)
     }
 
     av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration returned %d\n", maxDuration);
+    get_duration2(s);
     return maxDuration;
 }
 
