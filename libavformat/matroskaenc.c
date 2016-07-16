@@ -1487,20 +1487,6 @@ static int mkv_write_attachments(AVFormatContext *s)
     return 0;
 }
 
-static int64_t get_duration(AVFormatContext *s)
-{
-    int i = 0;
-    int64_t maxDuration = 0;
-    for (i = 0; i < s->nb_streams; i++) {
-        int64_t streamDuration = s->streams[i]->duration;
-        maxDuration = FFMAX(maxDuration, streamDuration);
-    }
-
-    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration returned %d\n", maxDuration);
-    get_duration2(s);
-    return maxDuration;
-}
-
 static double get_duration2(AVFormatContext *s)
 {
     int i = 0;
@@ -1514,6 +1500,20 @@ static double get_duration2(AVFormatContext *s)
 
     av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration2 returned %f\n", max);
     return max / 1000;
+}
+
+static int64_t get_duration(AVFormatContext *s)
+{
+    int i = 0;
+    int64_t maxDuration = 0;
+    for (i = 0; i < s->nb_streams; i++) {
+        int64_t streamDuration = s->streams[i]->duration;
+        maxDuration = FFMAX(maxDuration, streamDuration);
+    }
+
+    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration returned %d\n", maxDuration);
+    get_duration2(s);
+    return maxDuration;
 }
 
 static int mkv_write_header(AVFormatContext *s)
