@@ -1512,7 +1512,7 @@ static double get_duration2(AVFormatContext *s)
         if (atof(duration->value) > max) max = atof(duration->value);
     }
 
-    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration2 returned %d\n", max);
+    av_log(s, AV_LOG_WARNING, "MKV encoder: get_duration2 returned %f\n", max);
     return max / 1000;
 }
 
