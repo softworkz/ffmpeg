@@ -1063,7 +1063,7 @@ static int open_input_file(OptionsContext *o, const char *filename)
     f->rate_emu   = o->rate_emu;
     f->accurate_seek = o->accurate_seek;
     f->loop = o->loop;
-    f->duration = 0;
+    f->duration = ic->duration;
     f->time_base = (AVRational){ 1, 1 };
 #if HAVE_PTHREADS
     f->thread_queue_size = o->thread_queue_size > 0 ? o->thread_queue_size : 8;
