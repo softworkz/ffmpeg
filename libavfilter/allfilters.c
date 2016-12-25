@@ -104,6 +104,10 @@ void avfilter_register_all(void)
     REGISTER_FILTER(SINE,           sine,           asrc);
 
     REGISTER_FILTER(ANULLSINK,      anullsink,      asink);
+    
+    // PLEX
+    REGISTER_FILTER(INLINEASS,      inlineass,      vf);
+    // PLEX
 
     REGISTER_FILTER(ALPHAEXTRACT,   alphaextract,   vf);
     REGISTER_FILTER(ALPHAMERGE,     alphamerge,     vf);

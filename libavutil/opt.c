@@ -1464,7 +1464,10 @@ int av_opt_set_dict2(void *obj, AVDictionary **options, int search_flags)
             av_dict_set(&tmp, t->key, t->value, 0);
         else if (ret < 0) {
             av_log(obj, AV_LOG_ERROR, "Error setting option %s to value %s.\n", t->key, t->value);
-            break;
+//PLEX
+            fprintf(stderr, "Error setting option %s to value %s.\n", t->key, t->value);
+            //break;
+//PLEX
         }
         ret = 0;
     }

@@ -41,6 +41,10 @@
 #include "libavutil/pixdesc.h"
 #include "libavutil/pixfmt.h"
 
+//PLEX
+#include "plex.h"
+//PLEX
+
 #define MATCH_PER_STREAM_OPT(name, type, outvar, fmtctx, st)\
 {\
     int i, ret;\
@@ -1431,6 +1435,44 @@ static OutputStream *new_video_stream(OptionsContext *o, AVFormatContext *oc, in
     if (ost->stream_copy)
         check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_VIDEO);
 
+//PLEX
+    if (source_index >= 0)
+    {
+      // See if things are sane.
+      long int averageFPS = 0;
+      if (input_streams[source_index]->st->avg_frame_rate.den != 0)
+        averageFPS = (int)(av_q2d(input_streams[source_index]->st->avg_frame_rate)+0.5);
+
+      long int framerateFPS = 0;
+      if (input_streams[source_index]->st->r_frame_rate.den != 0)
+        framerateFPS = (int)(av_q2d(input_streams[source_index]->st->r_frame_rate)+0.5);
+
+      PMS_Log(LOG_LEVEL_DEBUG, "Average FPS ~ %d fps, Frame rate ~ %d fps.", averageFPS, framerateFPS);
+
+      // Don't trust any super high framerates. But if a frame rate was specified, just use that.
+      if (!frame_rate && averageFPS != 0 && framerateFPS != 0 && abs(averageFPS - framerateFPS) > 10)
+      {
+        AVStream* st = input_streams[source_index]->st;
+
+        PMS_Log(LOG_LEVEL_DEBUG, "Codec frame rate differs from container rate, attempting to fix.");
+
+        if (st->avg_frame_rate.den != 0)
+        {
+          ost->frame_rate.num = st->avg_frame_rate.num;
+          ost->frame_rate.den = st->avg_frame_rate.den;
+          PMS_Log(LOG_LEVEL_DEBUG, "Forcing fps to frame rate of %f.", av_q2d(st->avg_frame_rate));
+        }
+
+        if (st->avg_frame_rate.den == 0 || av_q2d(st->avg_frame_rate) > 150.0)
+        {
+          ost->frame_rate.num = st->r_frame_rate.num;
+          ost->frame_rate.den = st->r_frame_rate.den;
+          PMS_Log(LOG_LEVEL_DEBUG, "Forcing fps to frame rate of %f.\n", av_q2d(st->r_frame_rate));
+        }
+      }
+    }
+//PLEX
+
     return ost;
 }
 
@@ -1817,6 +1859,17 @@ static int open_output_file(OptionsContext *o, const char *filename)
         }
     }
 
+//PLEX
+        /* we need to detect the format of the subtitle stream (if any) and init
+         some stuff before we do the actual pre set-up */
+        for (i = 0; i < nb_input_streams; i++)
+            plex_prepare_setup_streams_for_input_stream(input_streams[i]);
+
+        /* we need to choose the subtitle stream we want to burn in
+         (needs to be processed BEFORE the video stream is set up
+         as this call will configer the vfilters) */
+//PLEX
+
     if (!strcmp(file_oformat->name, "ffm") && !override_ffserver &&
         av_strstart(filename, "http:", NULL)) {
         int j;
@@ -1868,8 +1921,12 @@ static int open_output_file(OptionsContext *o, const char *filename)
                     idx = i;
                 }
             }
-            if (idx >= 0)
+//PLEX
+            if (idx >= 0) {
+                plex_link_input_stream(input_streams[idx]);
                 new_video_stream(o, oc, idx);
+            }
+//PLEX
         }
 
         /* audio: most channels */
@@ -1928,6 +1985,10 @@ static int open_output_file(OptionsContext *o, const char *filename)
                 OutputFilter *ofilter = NULL;
                 int j, k;
 
+//PLEX
+                plex_link_input_stream(input_streams[input_files[map->file_index]->ist_index + map->stream_index]);
+//PLEX
+
                 for (j = 0; j < nb_filtergraphs; j++) {
                     fg = filtergraphs[j];
                     for (k = 0; k < fg->nb_outputs; k++) {
@@ -1957,6 +2018,10 @@ loop_end:
                     continue;
                 if(o->    data_disable && ist->st->codec->codec_type == AVMEDIA_TYPE_DATA)
                     continue;
+
+//PLEX
+                plex_link_input_stream(ist);
+//PLEX
 
                 switch (ist->st->codec->codec_type) {
                 case AVMEDIA_TYPE_VIDEO:      ost = new_video_stream     (o, oc, src_idx); break;
@@ -3090,5 +3155,10 @@ const OptionDef options[] = {
     { "dn", OPT_BOOL | OPT_VIDEO | OPT_OFFSET | OPT_INPUT | OPT_OUTPUT, { .off = OFFSET(data_disable) },
         "disable data" },
 
+//PLEX
+    { "map_inlineass", HAS_ARG | OPT_EXPERT | OPT_PERFILE | OPT_OUTPUT, { .func_arg = plex_opt_subtitle_stream }, "index of the subtitle stream to burn into the video", "input_file_id:stream_specifier" },
+    { "progressurl", HAS_ARG | OPT_EXPERT, { .func_arg = plex_opt_progress_url }, "write progress information via HTTP PUT", "url" },
+    { "loglevel_plex", HAS_ARG | OPT_EXPERT, { .func_arg = plex_opt_loglevel}, "log level for messages that will be sent to PMS", "" },
+//PLEX
     { NULL, },
 };

@@ -35,6 +35,10 @@
 
 #define PCR_TIME_BASE 27000000
 
+// PLEX
+AVDictionary* cc_dict = NULL;
+// PLEX
+
 /* write DVB SI sections */
 
 /*********************************************/
@@ -91,6 +95,7 @@ typedef struct MpegTSWrite {
     int tables_version;
 
     int omit_video_pes_length;
+    int include_sdt; // PLEX
 } MpegTSWrite;
 
 /* a PES packet header is generated every DEFAULT_PES_HEADER_FREQ packets */
@@ -505,6 +510,14 @@ static void mpegts_write_sdt(AVFormatContext *s)
     uint8_t data[SECTION_LENGTH], *q, *desc_list_len_ptr, *desc_len_ptr;
     int i, running_status, free_ca_mode, val;
 
+    // PLEX
+    // The Roku gets confused by SDT packets in a way that often leads to firmware
+    // crashes. There's never anything interesting in the SDT anyway, so we
+    // default to omitting it.
+    if (!ts->include_sdt)
+        return;
+    // PLEX
+
     q = data;
     put16(&q, ts->onid);
     *q++ = 0xff;
@@ -693,6 +706,17 @@ static int mpegts_write_header(AVFormatContext *s)
         ts_st->payload_dts     = AV_NOPTS_VALUE;
         ts_st->first_pts_check = 1;
         ts_st->cc              = 15;
+
+        // PLEX.
+        // See if there's an initial value for the stream and set it. This
+        // ensures continuity when doing segmented transcodes.
+        //
+        char key[8]; sprintf(key, "%x", ts_st->pid);
+        AVDictionaryEntry* entry = av_dict_get(cc_dict, key, 0, 0);
+        if (entry)
+          ts_st->cc = entry->value[0];
+        // PLEX.
+
         /* update PCR pid by using the first video stream */
         if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO &&
             service->pcr_pid == 0x1fff) {
@@ -995,6 +1019,15 @@ static void mpegts_write_pes(AVFormatContext *s, AVStream *st,
         *q++      = val;
         *q++      = ts_st->pid;
         ts_st->cc = ts_st->cc + 1 & 0xf;
+
+        // PLEX.
+        {
+          char key[8]; sprintf(key, "%x", ts_st->pid);
+          char val[] = { ts_st->cc, 0 };
+          av_dict_set(&cc_dict, key, val, 0);
+        }
+        // PLEX.
+
         *q++      = 0x10 | ts_st->cc; // payload indicator + CC
         if (key && is_start && pts != AV_NOPTS_VALUE) {
             // set Random Access for key frames
@@ -1250,11 +1283,25 @@ static int mpegts_write_packet_internal(AVFormatContext *s, AVPacket *pkt)
             dts += delay;
     }
 
+    //PLEX
+    if (ts_st->first_pts_check && pts == AV_NOPTS_VALUE)
+        pts = dts;
+    //PLEX
+
     if (ts_st->first_pts_check && pts == AV_NOPTS_VALUE) {
         av_log(s, AV_LOG_ERROR, "first pts value must be set\n");
         return AVERROR_INVALIDDATA;
     }
     ts_st->first_pts_check = 0;
+
+    //PLEX
+    if (dts < 0 || pts < 0) {
+        // We can't write packets with negative DTS/PTS, but AAC in particular is
+        // likely to create a couple because of its encoder delay.
+        av_log(s, AV_LOG_WARNING, "Ignoring packet with negative DTS (%lld) PTS (%lld) for codec %d\n", dts, pts, st->codec->codec_id);
+        return 0;
+    }
+    //PLEX
 
     if (st->codec->codec_id == AV_CODEC_ID_H264) {
         const uint8_t *p = buf, *buf_end = p + size;
@@ -1494,6 +1541,6 @@ AVOutputFormat ff_mpegts_muxer = {
     .write_header   = mpegts_write_header,
     .write_packet   = mpegts_write_packet,
     .write_trailer  = mpegts_write_end,
-    .flags          = AVFMT_ALLOW_FLUSH,
+    .flags          = AVFMT_ALLOW_FLUSH | AVFMT_TS_NEGATIVE, //PLEX: add NEGATIVE
     .priv_class     = &mpegts_muxer_class,
 };

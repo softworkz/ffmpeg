@@ -33,6 +33,7 @@ typedef struct H264BSFContext {
     uint8_t  idr_sps_seen;
     uint8_t  idr_pps_seen;
     int      extradata_parsed;
+    int      ran_into_error; //PLEX
 } H264BSFContext;
 
 static int alloc_and_copy(uint8_t **poutbuf, int *poutbuf_size,
@@ -151,7 +152,7 @@ static int h264_mp4toannexb_filter(AVBitStreamFilterContext *bsfc,
     int ret = 0;
 
     /* nothing to filter */
-    if (!avctx->extradata || avctx->extradata_size < 6) {
+    if (ctx->ran_into_error || !avctx->extradata || avctx->extradata_size < 6) { //PLEX
         *poutbuf      = (uint8_t *)buf;
         *poutbuf_size = buf_size;
         return 0;
@@ -160,8 +161,14 @@ static int h264_mp4toannexb_filter(AVBitStreamFilterContext *bsfc,
     /* retrieve sps and pps NAL units from extradata */
     if (!ctx->extradata_parsed) {
         ret = h264_extradata_to_annexb(ctx, avctx, FF_INPUT_BUFFER_PADDING_SIZE);
-        if (ret < 0)
+
+        //PLEX
+        if (ret < 0) {
+            ctx->ran_into_error = 1;
             return ret;
+        }
+        //PLEX
+
         ctx->length_size      = ret;
         ctx->new_idr          = 1;
         ctx->idr_sps_seen     = 0;
@@ -179,6 +186,62 @@ static int h264_mp4toannexb_filter(AVBitStreamFilterContext *bsfc,
         for (nal_size = 0, i = 0; i<ctx->length_size; i++)
             nal_size = (nal_size << 8) | buf[i];
 
+// PLEX
+        // Stole some code from h264.c to parse these strange creatures. When we run into them it looks like a giant NAL
+        // from the code below, so we'll first make the code run very conservatively until proven otherwise.
+        //
+        if (buf + nal_size > buf_end || nal_size < 0)
+        {
+            // We would have overflowed, let's see if we have one of these little buggers.
+            if ((buf_end-buf) >= 9 && buf[0] == 1 && buf[2] == 0 && (buf[4]&0xFC) == 0xFC && (buf[5]&0x1F) && buf[8] == 0x67)
+            {
+                int cnt= buf[5]&0x1f;
+                const uint8_t *p= buf+6;
+                while(cnt--)
+                {
+                    int nalsize= AV_RB16(p) + 2;
+                    if (nalsize > buf_size - (p-buf) || p[2]!=0x67)
+                        goto not_extra;
+                    p += nalsize;
+                }
+            
+                cnt = *(p++);
+                if(!cnt)
+                    goto not_extra;
+            
+                while(cnt--)
+                {
+                    int nalsize= AV_RB16(p) + 2;
+                    if(nalsize > buf_size - (p-buf) || p[2]!=0x68)
+                        goto not_extra;
+                    p += nalsize;
+                }
+
+                // We're handling the one case we've seen where the entire first packet is this oddity.
+                buf = p;
+                if (buf == buf_end)
+                {
+                    alloc_and_copy(poutbuf, poutbuf_size,
+                                   NULL, 0,
+                                   buf, buf_size);
+                    return 1;
+                }
+            }
+            else if (buf_end-buf == buf_size)
+            {
+                // OK, this entire packet is on crack.
+                av_log(avctx, AV_LOG_WARNING, "First NAL in packet on crack, not processing.\n");
+                alloc_and_copy(poutbuf, poutbuf_size,
+                               avctx->extradata, avctx->extradata_size,
+                               buf, 0);
+                return 1;
+            }
+        }
+        
+not_extra:
+
+// PLEX
+        
         buf      += ctx->length_size;
         unit_type = *buf & 0x1f;
 
@@ -248,6 +311,7 @@ next_nal:
     return 1;
 
 fail:
+    ctx->ran_into_error = 1; //PLEX
     av_freep(poutbuf);
     *poutbuf_size = 0;
     return ret;

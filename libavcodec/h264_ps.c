@@ -284,6 +284,7 @@ static void decode_scaling_matrices(H264Context *h, SPS *sps,
     };
     if (get_bits1(&h->gb)) {
         sps->scaling_matrix_present |= is_sps;
+        h->avctx->scaling_matrix_present |= is_sps; //PLEX
         decode_scaling_list(h, scaling_matrix4[0], 16, default_scaling4[0], fallback[0]);        // Intra, Y
         decode_scaling_list(h, scaling_matrix4[1], 16, default_scaling4[0], scaling_matrix4[0]); // Intra, Cr
         decode_scaling_list(h, scaling_matrix4[2], 16, default_scaling4[0], scaling_matrix4[1]); // Intra, Cb

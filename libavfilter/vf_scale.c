@@ -41,11 +41,24 @@
 #include "libavutil/avassert.h"
 #include "libswscale/swscale.h"
 
+// PLEX
+#include "libavformat/avformat.h"
+
+typedef struct InputFile
+{
+    AVFormatContext *ctx;
+} InputFile;
+
+extern InputFile** input_files;
+// PLEX
+
 static const char *const var_names[] = {
     "in_w",   "iw",
     "in_h",   "ih",
     "out_w",  "ow",
     "out_h",  "oh",
+    "plex_in_w",
+    "plex_in_h",
     "a",
     "sar",
     "dar",
@@ -61,6 +74,7 @@ enum var_name {
     VAR_IN_H,   VAR_IH,
     VAR_OUT_W,  VAR_OW,
     VAR_OUT_H,  VAR_OH,
+    VAR_PLEX_IN_W, VAR_PLEX_IN_H,
     VAR_A,
     VAR_SAR,
     VAR_DAR,
@@ -245,6 +259,17 @@ static int config_props(AVFilterLink *outlink)
     int ret;
     int factor_w, factor_h;
 
+// PLEX
+    // This is useful for when we're burning VOBSUB from an external file, b/c those are usually bigger than the video file.
+    // If we don't scale to the video file's size, the overlay will fail. Hacking this was easier than fixing overlay. Trust me.
+    //
+    if (input_files[0] && input_files[0]->ctx && input_files[0]->ctx->streams && input_files[0]->ctx->streams[0]->codec)
+    {
+      var_values[VAR_PLEX_IN_W] = input_files[0]->ctx->streams[0]->codec->width;
+      var_values[VAR_PLEX_IN_H] = input_files[0]->ctx->streams[0]->codec->height;
+    }
+// PLEX
+
     var_values[VAR_IN_W]  = var_values[VAR_IW] = inlink->w;
     var_values[VAR_IN_H]  = var_values[VAR_IH] = inlink->h;
     var_values[VAR_OUT_W] = var_values[VAR_OW] = NAN;
@@ -308,8 +333,16 @@ static int config_props(AVFilterLink *outlink)
     /* Note that force_original_aspect_ratio may overwrite the previous set
      * dimensions so that it is not divisible by the set factors anymore. */
     if (scale->force_original_aspect_ratio) {
-        int tmp_w = av_rescale(h, inlink->w, inlink->h);
-        int tmp_h = av_rescale(w, inlink->h, inlink->w);
+//PLEX: Use the DAR instead of the raw pixel ratio
+        int tmp_w, tmp_h;
+        if (inlink->sample_aspect_ratio.num && inlink->sample_aspect_ratio.den) {
+            tmp_w = av_rescale(h, inlink->w * inlink->sample_aspect_ratio.num, inlink->h * inlink->sample_aspect_ratio.den);
+            tmp_h = av_rescale(w, inlink->h * inlink->sample_aspect_ratio.den, inlink->w * inlink->sample_aspect_ratio.num);
+        } else {
+            tmp_w = av_rescale(h, inlink->w, inlink->h);
+            tmp_h = av_rescale(w, inlink->h, inlink->w);
+        }
+//PLEX
 
         if (scale->force_original_aspect_ratio == 1) {
              w = FFMIN(tmp_w, w);
@@ -318,6 +351,10 @@ static int config_props(AVFilterLink *outlink)
              w = FFMAX(tmp_w, w);
              h = FFMAX(tmp_h, h);
         }
+        //PLEX
+        w &= ~3;
+        h &= ~3;
+        //PLEX
     }
 
     if (w > INT_MAX || h > INT_MAX ||

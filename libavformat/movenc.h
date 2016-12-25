@@ -41,6 +41,7 @@
 #define MODE_IPOD 0x20
 #define MODE_ISM  0x40
 #define MODE_F4V  0x80
+#define MODE_DASH 0x100 //PLEX
 
 typedef struct MOVIentry {
     uint64_t     pos;
@@ -178,6 +179,7 @@ typedef struct MOVMuxContext {
 
     int reserved_moov_size; ///< 0 for disabled, -1 for automatic, size otherwise
     int64_t reserved_moov_pos;
+    int64_t mov_start_offset; //PLEX
 
     char *major_brand;
 
@@ -208,5 +210,13 @@ int ff_mov_add_hinted_packet(AVFormatContext *s, AVPacket *pkt,
                              int track_index, int sample,
                              uint8_t *sample_data, int sample_size);
 void ff_mov_close_hinting(MOVTrack *track);
+
+//PLEX
+int mov_write_header(AVFormatContext *s);
+int mov_write_trailer(AVFormatContext *s);
+int mov_write_moov_tag(AVIOContext *pb, MOVMuxContext *mov, AVFormatContext *s);
+int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s);
+int mov_write_mfra_tag(AVIOContext *pb, MOVMuxContext *mov);
+//PLEX
 
 #endif /* AVFORMAT_MOVENC_H */

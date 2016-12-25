@@ -21,7 +21,6 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/dict.h"
-#include "libavutil/mathematics.h"
 #include "avformat.h"
 #include "avio_internal.h"
 #include "internal.h"
@@ -213,6 +212,7 @@ typedef struct {
     uint64_t next_packet_offset;
     int      next_start_sec;
     int      end_sec;
+    long long offset; //PLEX
 } ASFContext;
 
 static const AVCodecTag codec_asf_bmp_tags[] = {
@@ -287,64 +287,6 @@ static int64_t unix_to_file_time(int ti)
     return t;
 }
 
-static int32_t get_send_time(ASFContext *asf, int64_t pres_time, uint64_t *offset)
-{
-    int i;
-    int32_t send_time = 0;
-    *offset = asf->data_offset + DATA_HEADER_SIZE;
-    for (i = 0; i < asf->next_start_sec; i++) {
-        if (pres_time <= asf->index_ptr[i].send_time)
-            break;
-        send_time = asf->index_ptr[i].send_time;
-        *offset   = asf->index_ptr[i].offset;
-    }
-
-    return send_time / 10000;
-}
-
-static int asf_write_markers(AVFormatContext *s)
-{
-    ASFContext *asf = s->priv_data;
-    AVIOContext *pb = s->pb;
-    int i;
-    AVRational scale = {1, 10000000};
-    int64_t hpos = put_header(pb, &ff_asf_marker_header);
-
-    ff_put_guid(pb, &ff_asf_reserved_4);// ASF spec mandates this reserved value
-    avio_wl32(pb, s->nb_chapters);     // markers count
-    avio_wl16(pb, 0);                  // ASF spec mandates 0 for this
-    avio_wl16(pb, 0);                  // name length 0, no name given
-
-    for (i = 0; i < s->nb_chapters; i++) {
-        AVChapter *c = s->chapters[i];
-        AVDictionaryEntry *t = av_dict_get(c->metadata, "title", NULL, 0);
-        int64_t pres_time = av_rescale_q(c->start, c->time_base, scale);
-        uint64_t offset;
-        int32_t send_time = get_send_time(asf, pres_time, &offset);
-        int len = 0;
-        uint8_t *buf;
-        AVIOContext *dyn_buf;
-        if (t) {
-            if (avio_open_dyn_buf(&dyn_buf) < 0)
-                return AVERROR(ENOMEM);
-            avio_put_str16le(dyn_buf, t->value);
-            len = avio_close_dyn_buf(dyn_buf, &buf);
-        }
-        avio_wl64(pb, offset);            // offset of the packet with send_time
-        avio_wl64(pb, pres_time + PREROLL_TIME * 10000); // presentation time
-        avio_wl16(pb, 12 + len);          // entry length
-        avio_wl32(pb, send_time);         // send time
-        avio_wl32(pb, 0);                 // flags, should be 0
-        avio_wl32(pb, len / 2);           // marker desc length in WCHARS!
-        if (t) {
-            avio_write(pb, buf, len);     // marker desc
-            av_freep(&buf);
-        }
-    }
-    end_header(pb, hpos);
-    return 0;
-}
-
 /* write the header (used two times if non streamed) */
 static int asf_write_header1(AVFormatContext *s, int64_t file_size,
                              int64_t data_chunk_size)
@@ -359,6 +301,12 @@ static int asf_write_header1(AVFormatContext *s, int64_t file_size,
     int64_t header_offset, cur_pos, hpos;
     int bit_rate;
     int64_t duration;
+    //PLEX
+    AVDictionaryEntry* pDuration = NULL;
+    AVDictionaryEntry* pOffset = NULL;
+    AVDictionaryEntry* pSeekOffset = NULL;
+    long long seek_offset = 0L;
+    //PLEX
 
     ff_metadata_conv(&s->metadata, ff_asf_metadata_conv, NULL);
 
@@ -368,9 +316,48 @@ static int asf_write_header1(AVFormatContext *s, int64_t file_size,
     tags[3] = av_dict_get(s->metadata, "comment", NULL, 0);
     tags[4] = av_dict_get(s->metadata, "rating", NULL, 0);
 
+    //PLEX
+    pOffset = av_dict_get(s->metadata, "plex.start_offset", NULL, 0);
+    if (pOffset)
+    {
+        asf->offset = atoll(pOffset->value)/1000;
+        av_log(s, AV_LOG_WARNING, "ASF - shifting timestamps, since there is offset of %lld (parsed from %s).\n", asf->offset, pOffset->value);
+    }
+
+    pDuration = av_dict_get(s->metadata, "plex.duration", NULL, 0);
+    if (pDuration)
+    {
+        double duration = atof(pDuration->value)*10000000.0;
+        asf->duration = (int64_t)duration;
+        asf->is_streamed = 0;
+        av_log(s, AV_LOG_INFO, "ASF - setting duration to %lld, is_streamed to 0.\n", asf->duration);
+    }
+
+    pSeekOffset = av_dict_get(s->metadata, "plex.seek_offset", NULL, 0);
+    if (pSeekOffset) {
+        seek_offset = atoll(pSeekOffset->value);
+        av_log(s, AV_LOG_INFO, "ASF - seek_offset is %lld.\n", seek_offset);
+    }
+    //PLEX
+
+
     duration       = asf->duration + PREROLL_TIME * 10000;
     has_title      = tags[0] || tags[1] || tags[2] || tags[3] || tags[4];
     metadata_count = av_dict_count(s->metadata);
+
+    //PLEX
+    // Ignore special plex.* values when writing metadata. If we're doing a
+    // seek by starting at an offset we need to generate a header of the
+    // same size as the first time around, which we can only do if we always
+    // ignore metadata that might change.
+    if (metadata_count) {
+        AVDictionaryEntry *tag = NULL;
+        while ((tag = av_dict_get(s->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
+            if (strncmp(tag->key, "plex.", 5) == 0)
+                metadata_count--;
+        }
+    }
+    //PLEX
 
     bit_rate = 0;
     for (n = 0; n < s->nb_streams; n++) {
@@ -391,7 +378,7 @@ static int asf_write_header1(AVFormatContext *s, int64_t file_size,
 
     ff_put_guid(pb, &ff_asf_header);
     avio_wl64(pb, -1); /* header length, will be patched after */
-    avio_wl32(pb, 3 + has_title + !!metadata_count + s->nb_streams); /* number of chunks in header */
+    avio_wl32(pb, 3 + has_title + !!metadata_count + s->nb_streams + !!seek_offset); /* number of chunks in header */ //PLEX
     avio_w8(pb, 1); /* ??? */
     avio_w8(pb, 2); /* ??? */
 
@@ -476,18 +463,17 @@ static int asf_write_header1(AVFormatContext *s, int64_t file_size,
         hpos = put_header(pb, &ff_asf_extended_content_header);
         avio_wl16(pb, metadata_count);
         while ((tag = av_dict_get(s->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-            put_str16(pb, tag->key);
-            avio_wl16(pb, 0);
-            put_str16(pb, tag->value);
+            //PLEX
+            if (strncmp(tag->key, "plex.", 5) != 0) {
+                put_str16(pb, tag->key);
+                avio_wl16(pb, 0);
+                put_str16(pb, tag->value);
+            }
+            //PLEX
         }
         end_header(pb, hpos);
     }
-    /* chapters using ASF markers */
-    if (!asf->is_streamed && s->nb_chapters) {
-        int ret;
-        if (ret = asf_write_markers(s))
-            return ret;
-    }
+
     /* stream headers */
     for (n = 0; n < s->nb_streams; n++) {
         int64_t es_pos;
@@ -616,6 +602,39 @@ static int asf_write_header1(AVFormatContext *s, int64_t file_size,
             return -1;
     }
     end_header(pb, hpos);
+
+    //PLEX
+    /* plex offset headers */
+    if (seek_offset > 0) {
+        // We're starting in the middle, responding to a request for a
+        // particular byte range. We need to make the first frame
+        // start somewhere that would have been valid based on the
+        // original file. We can do that by adding a dummy header of
+        // whatever length we need.
+
+        int normal_start_pos;
+        int desired_offset;
+        int pad_size;
+        unsigned char *pad_buf;
+        const int header_overhead = 40; // 2 GUIDs and 8 bytes for the length
+
+        cur_pos = avio_tell(pb);  // we're currently where the header would have ended
+        normal_start_pos = cur_pos + data_chunk_size;
+        desired_offset = s->packet_size - ((seek_offset - normal_start_pos) % s->packet_size);
+        pad_size = (desired_offset - normal_start_pos - header_overhead) % s->packet_size;
+
+        av_log(s, AV_LOG_WARNING, "ASF - adding offset header of size %d to align first frame, since there is a seek offset of %lld\n", pad_size + header_overhead, seek_offset);
+
+        // We don't care about our header being understood, use the dummy GUID.
+        hpos = put_header(pb, &ff_asf_my_guid);
+        ff_put_guid(pb, &ff_asf_my_guid);
+        pad_buf = (unsigned char*)av_mallocz(pad_size);
+        avio_write(pb, pad_buf, pad_size);
+        end_header(pb, hpos);
+
+        av_free(pad_buf);
+    }
+    //PLEX
 
     /* patch the header size fields */
 
@@ -933,7 +952,7 @@ static int asf_write_packet(AVFormatContext *s, AVPacket *pkt)
 
     packet_number = asf->nb_packets;
     put_frame(s, stream, s->streams[pkt->stream_index],
-              pkt->dts, pkt->data, pkt->size, flags);
+              pkt->dts + asf->offset, pkt->data, pkt->size, flags); //PLEX
 
     start_sec = (int)((PREROLL_TIME * 10000 + pts + ASF_INDEXED_INTERVAL - 1)
               / ASF_INDEXED_INTERVAL);

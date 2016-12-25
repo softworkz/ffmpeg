@@ -14,6 +14,10 @@ LIBAVFORMAT_$MAJOR {
                 ffurl_seek;
                 ffurl_size;
                 ffurl_write;
+#PLEX
+                mov_write_moov_tag;
+                ffurl_register_protocol;
+#PLEX
                 #those are deprecated, remove on next bump
                 url_feof;
         local: *;

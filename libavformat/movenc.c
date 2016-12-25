@@ -2946,7 +2946,8 @@ static void build_chunks(MOVTrack *trk)
     }
 }
 
-static int mov_write_moov_tag(AVIOContext *pb, MOVMuxContext *mov,
+//PLEX: De-static'd
+int mov_write_moov_tag(AVIOContext *pb, MOVMuxContext *mov,
                               AVFormatContext *s)
 {
     int i;
@@ -3546,7 +3547,8 @@ static int mov_write_tfra_tag(AVIOContext *pb, MOVTrack *track)
     return update_size(pb, pos);
 }
 
-static int mov_write_mfra_tag(AVIOContext *pb, MOVMuxContext *mov)
+//PLEX: De-static'd
+int mov_write_mfra_tag(AVIOContext *pb, MOVMuxContext *mov)
 {
     int64_t pos = avio_tell(pb);
     int i;
@@ -3584,7 +3586,8 @@ static int mov_write_mdat_tag(AVIOContext *pb, MOVMuxContext *mov)
 }
 
 /* TODO: This needs to be more general */
-static int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
+//PLEX De-static'd
+int mov_write_ftyp_tag(AVIOContext *pb, AVFormatContext *s)
 {
     MOVMuxContext *mov = s->priv_data;
     int64_t pos = avio_tell(pb);
@@ -4512,7 +4515,8 @@ static int mov_create_dvd_sub_decoder_specific_info(MOVTrack *track,
     return 0;
 }
 
-static int mov_write_header(AVFormatContext *s)
+//PLEX: De-Static'd
+int mov_write_header(AVFormatContext *s)
 {
     AVIOContext *pb = s->pb;
     MOVMuxContext *mov = s->priv_data;
@@ -4701,6 +4705,17 @@ static int mov_write_header(AVFormatContext *s)
                        "WARNING codec timebase is very high. If duration is too long,\n"
                        "file may not be playable by quicktime. Specify a shorter timebase\n"
                        "or choose different container.\n");
+
+            // PLEX
+            // Why just warn when you can fix? It should be safe to adjust the
+            // timescale here. Apple things, like QuickTime and iOS, seem to use
+            // a 32 bit value for PTS, so a really large timescale means that
+            // we may quickly run into trouble. This way we should be fine for
+            // content shorter than 12 hours.
+            //
+            if (track->timescale > 100000)
+                track->timescale = 100000;
+            // PLEX
         } else if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO) {
             track->timescale = st->codec->sample_rate;
             if (!st->codec->frame_size && !av_get_bits_per_sample(st->codec->codec_id)) {
@@ -4999,7 +5014,8 @@ end:
     return ret;
 }
 
-static int mov_write_trailer(AVFormatContext *s)
+//PLEX: De-static'd
+int mov_write_trailer(AVFormatContext *s)
 {
     MOVMuxContext *mov = s->priv_data;
     AVIOContext *pb = s->pb;

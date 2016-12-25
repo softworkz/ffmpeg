@@ -24,6 +24,11 @@
  * logging functions
  */
 
+//PLEX
+#include "libavformat/plex_http.h"
+#include "plexConfig.h"
+//PLEX
+
 #include "config.h"
 
 #if HAVE_UNISTD_H
@@ -43,11 +48,16 @@
 #if HAVE_PTHREADS
 #include <pthread.h>
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+//PLEX
+static pthread_key_t thread_key;
+static pthread_once_t key_once = PTHREAD_ONCE_INIT;
+//PLEX
 #endif
 
 #define LINE_SZ 1024
 
 static int av_log_level = AV_LOG_INFO;
+static int av_log_level_plex = AV_LOG_ERROR; //PLEX
 static int flags;
 
 #if defined(_WIN32) && !defined(__MINGW32CE__) && HAVE_SETCONSOLETEXTATTRIBUTE
@@ -281,6 +291,16 @@ void av_log_format_line(void *ptr, int level, const char *fmt, va_list vl,
     av_bprint_finalize(part+3, NULL);
 }
 
+//PLEX
+#if HAVE_PTHREADS
+static void
+make_key()
+{
+    pthread_key_create(&thread_key, NULL);
+}
+#endif
+//PLEX
+
 void av_log_default_callback(void* ptr, int level, const char* fmt, va_list vl)
 {
     static int print_prefix = 1;
@@ -291,14 +311,34 @@ void av_log_default_callback(void* ptr, int level, const char* fmt, va_list vl)
     static int is_atty;
     int type[2];
     unsigned tint = 0;
+//PLEX
+#if HAVE_PTHREADS
+    pthread_once(&key_once, make_key);
+#else
+    static int logging = 0;
+#endif
+//PLEX
 
     if (level >= 0) {
         tint = level & 0xff00;
         level &= 0xff;
     }
 
-    if (level > av_log_level)
+//PLEX
+    if (level > av_log_level && level > av_log_level_plex)
         return;
+    //Avoid recusive logging
+#if HAVE_PTHREADS
+    if (pthread_getspecific(thread_key))
+        return;
+    pthread_setspecific(thread_key, (void*)1);
+#else
+    if (logging)
+        return;
+    logging = 1;
+#endif
+//PLEX
+
 #if HAVE_PTHREADS
     pthread_mutex_lock(&mutex);
 #endif
@@ -314,27 +354,48 @@ void av_log_default_callback(void* ptr, int level, const char* fmt, va_list vl)
     if (print_prefix && (flags & AV_LOG_SKIP_REPEATED) && !strcmp(line, prev) &&
         *line && line[strlen(line) - 1] != '\r'){
         count++;
-        if (is_atty == 1)
+        if (is_atty == 1 && level <= av_log_level) //PLEX
             fprintf(stderr, "    Last message repeated %d times\r", count);
         goto end;
     }
-    if (count > 0) {
+    if (count > 0 && level <= av_log_level) { //PLEX
         fprintf(stderr, "    Last message repeated %d times\n", count);
         count = 0;
     }
     strcpy(prev, line);
-    sanitize(part[0].str);
-    colored_fputs(type[0], 0, part[0].str);
-    sanitize(part[1].str);
-    colored_fputs(type[1], 0, part[1].str);
-    sanitize(part[2].str);
-    colored_fputs(av_clip(level >> 3, 0, 6), tint >> 8, part[2].str);
-    sanitize(part[3].str);
-    colored_fputs(av_clip(level >> 3, 0, 6), tint >> 8, part[3].str);
+
+//PLEX
+    if (level <= av_log_level) {
+        sanitize(part[0].str);
+        colored_fputs(type[0], 0, part[0].str);
+        sanitize(part[1].str);
+        colored_fputs(type[1], 0, part[1].str);
+        sanitize(part[2].str);
+        colored_fputs(av_clip(level >> 3, 0, 6), tint >> 8, part[2].str);
+        sanitize(part[3].str);
+        colored_fputs(av_clip(level >> 3, 0, 6), tint >> 8, part[3].str);
+    }
+
+#ifndef PLEX_SHARED
+    if (level <= av_log_level_plex)
+    {
+        sanitize(line);
+        PMS_Log((level / 8) - 2, "%s", line);
+    }
+#endif
+//PLEX
+
 end:
     av_bprint_finalize(part+3, NULL);
 #if HAVE_PTHREADS
     pthread_mutex_unlock(&mutex);
+
+//PLEX
+    pthread_setspecific(thread_key, NULL);
+#else
+    logging = 0;
+//PLEX
+
 #endif
 }
 
@@ -369,6 +430,18 @@ void av_log_set_level(int level)
 {
     av_log_level = level;
 }
+
+//PLEX
+int av_log_get_level_plex(void)
+{
+    return av_log_level_plex;
+}
+
+void av_log_set_level_plex(int level)
+{
+    av_log_level_plex = level;
+}
+//PLEX
 
 void av_log_set_flags(int arg)
 {

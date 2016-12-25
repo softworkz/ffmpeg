@@ -37,6 +37,10 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/samplefmt.h"
 
+//PLEX
+#include "plex.h"
+//PLEX
+
 enum AVPixelFormat choose_pixel_fmt(AVStream *st, AVCodecContext *enc_ctx, AVCodec *codec, enum AVPixelFormat target)
 {
     if (codec && codec->pix_fmts) {
@@ -659,11 +663,21 @@ static int configure_input_video_filter(FilterGraph *fg, InputFilter *ifilter,
     if(!sar.den)
         sar = (AVRational){0,1};
     av_bprint_init(&args, 0, 1);
+    // PLEX
+    // If we run out of time in the analysis probe, the pixel format might
+    // not be detected correctly. This sets a sane default if that happens,
+    // which is probably good >75% of the time, which is better than 0%.
+    enum AVPixelFormat pix_fmt = ist->hwaccel_retrieve_data ?
+        ist->hwaccel_retrieved_pix_fmt : ist->resample_pix_fmt;
+    if(pix_fmt == AV_PIX_FMT_NONE){
+        pix_fmt = AV_PIX_FMT_YUV420P;
+    }
+    // PLEX
     av_bprintf(&args,
              "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:"
              "pixel_aspect=%d/%d:sws_param=flags=%d", ist->resample_width,
              ist->resample_height,
-             ist->hwaccel_retrieve_data ? ist->hwaccel_retrieved_pix_fmt : ist->resample_pix_fmt,
+             pix_fmt, // PLEX
              tb.num, tb.den, sar.num, sar.den,
              SWS_BILINEAR + ((ist->dec_ctx->flags&CODEC_FLAG_BITEXACT) ? SWS_BITEXACT:0));
     if (fr.num && fr.den)
@@ -940,6 +954,10 @@ int configure_filtergraph(FilterGraph *fg)
             fg->outputs[fg->nb_outputs - 1]->out_tmp->next = NULL;
         }
     }
+//PLEX
+    //make sure the inlineasscontext is set up properly for each stream
+    plex_link_subtitles_to_graph(fg->graph);
+//PLEX
 
     fg->reconfiguration = 1;
 

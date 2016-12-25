@@ -80,6 +80,7 @@ typedef struct DASHContext {
     int window_size;
     int extra_window_size;
     int min_seg_duration;
+    int64_t time_delta;
     int remove_at_exit;
     int use_template;
     int use_timeline;
@@ -93,6 +94,8 @@ typedef struct DASHContext {
     const char *single_file_name;
     const char *init_seg_name;
     const char *media_seg_name;
+    int segment_start_number;
+    int skip_to_segment;
 } DASHContext;
 
 static int dash_write(void *opaque, uint8_t *buf, int buf_size)
@@ -276,7 +279,7 @@ static DASHTmplId dash_read_tmpl_id(const char *identifier, char *format_tag,
         // next parse the dash format-tag and generate a c-string format tag
         // (next_ptr now points at the first '%' at the beginning of the format-tag)
         if (id_type != DASH_TMPL_ID_UNDEFINED) {
-            const char *number_format = DASH_TMPL_ID_TIME ? "lld" : "d";
+            const char *number_format = (id_type == DASH_TMPL_ID_TIME) ? "lld" : "d";
             if (next_ptr[0] == '$') { // no dash format-tag
                 snprintf(format_tag, format_tag_size, "%%%s", number_format);
                 *ptr = &next_ptr[1];
@@ -532,6 +535,10 @@ static int dash_write_header(AVFormatContext *s)
 
     if (c->single_file_name)
         c->single_file = 1;
+
+    if (c->skip_to_segment == -1)
+        c->skip_to_segment = c->segment_start_number;
+
     if (c->single_file)
         c->use_template = 0;
 
@@ -622,13 +629,20 @@ static int dash_write_header(AVFormatContext *s)
             goto fail;
         os->init_start_pos = 0;
 
-        av_dict_set(&opts, "movflags", "frag_custom+dash", 0);
+        if (c->skip_to_segment)
+            av_dict_set(&opts, "movflags", "frag_custom+dash+frag_discont", 0);
+        else
+            av_dict_set(&opts, "movflags", "frag_custom+dash", 0);
+
         if ((ret = avformat_write_header(ctx, &opts)) < 0) {
              goto fail;
         }
         os->ctx_inited = 1;
         avio_flush(ctx->pb);
         av_dict_free(&opts);
+
+        if (c->skip_to_segment)
+            av_opt_set_int(os->ctx, "fragments", c->skip_to_segment, AV_OPT_SEARCH_CHILDREN);
 
         if (c->single_file) {
             os->init_range_length = avio_tell(ctx->pb);
@@ -649,7 +663,7 @@ static int dash_write_header(AVFormatContext *s)
 
         set_codec_str(s, os->ctx->streams[0]->codec, os->codec_str, sizeof(os->codec_str));
         os->first_dts = AV_NOPTS_VALUE;
-        os->segment_index = 1;
+        os->segment_index = c->skip_to_segment;
     }
 
     if (!c->has_video && c->min_seg_duration <= 0) {
@@ -815,7 +829,7 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
     DASHContext *c = s->priv_data;
     AVStream *st = s->streams[pkt->stream_index];
     OutputStream *os = &c->streams[pkt->stream_index];
-    int64_t seg_end_duration = (os->segment_index) * (int64_t) c->min_seg_duration;
+    int64_t seg_end_duration = (os->segment_index - c->skip_to_segment + 1) * (int64_t) c->min_seg_duration;
     int ret;
 
     // If forcing the stream to start at 0, the mp4 muxer will set the start
@@ -832,7 +846,7 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
     if ((!c->has_video || st->codec->codec_type == AVMEDIA_TYPE_VIDEO) &&
         pkt->flags & AV_PKT_FLAG_KEY && os->packets_written &&
         av_compare_ts(pkt->dts - os->first_dts, st->time_base,
-                      seg_end_duration, AV_TIME_BASE_Q) >= 0) {
+                      seg_end_duration - c->time_delta, AV_TIME_BASE_Q) >= 0) {
         int64_t prev_duration = c->last_duration;
 
         c->last_duration = av_rescale_q(pkt->dts - os->start_dts,
@@ -850,6 +864,11 @@ static int dash_write_packet(AVFormatContext *s, AVPacket *pkt)
                        "and use_template, or keep a stricter keyframe interval\n");
             }
         }
+
+        av_log(s, AV_LOG_DEBUG, "Writing segment; duration: %"PRId64"; last TS: %"PRId64"\n",
+               c->last_duration, av_rescale_q(pkt->dts, st->time_base, AV_TIME_BASE_Q));
+        av_log(s, AV_LOG_DEBUG, "Target duration: %"PRId64"; First DTS: %"PRId64"\n",
+               seg_end_duration, av_rescale_q(os->first_dts, st->time_base, AV_TIME_BASE_Q));
 
         if ((ret = dash_flush(s, 0, pkt->stream_index)) < 0)
             return ret;
@@ -901,6 +920,7 @@ static const AVOption options[] = {
     { "window_size", "number of segments kept in the manifest", OFFSET(window_size), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, E },
     { "extra_window_size", "number of segments kept outside of the manifest before removing from disk", OFFSET(extra_window_size), AV_OPT_TYPE_INT, { .i64 = 5 }, 0, INT_MAX, E },
     { "min_seg_duration", "minimum segment duration (in microseconds)", OFFSET(min_seg_duration), AV_OPT_TYPE_INT64, { .i64 = 5000000 }, 0, INT_MAX, E },
+    { "time_delta", "set approximation value used for the segment times", OFFSET(time_delta), AV_OPT_TYPE_DURATION, { .i64 = 0 }, 0, 0, E },
     { "remove_at_exit", "remove all segments when finished", OFFSET(remove_at_exit), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, E },
     { "use_template", "Use SegmentTemplate instead of SegmentList", OFFSET(use_template), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, E },
     { "use_timeline", "Use SegmentTimeline in SegmentTemplate", OFFSET(use_timeline), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, E },
@@ -908,6 +928,8 @@ static const AVOption options[] = {
     { "single_file_name", "DASH-templated name to be used for baseURL. Implies storing all segments in one file, accessed using byte ranges", OFFSET(single_file_name), AV_OPT_TYPE_STRING, { .str = NULL }, 0, 0, E },
     { "init_seg_name", "DASH-templated name to used for the initialization segment", OFFSET(init_seg_name), AV_OPT_TYPE_STRING, {.str = "init-stream$RepresentationID$.m4s"},  0, 0, E },
     { "media_seg_name", "DASH-templated name to used for the media segments", OFFSET(media_seg_name), AV_OPT_TYPE_STRING, {.str = "chunk-stream$RepresentationID$-$Number%05d$.m4s"},  0, 0, E },
+    { "segment_start_number", "segment number to start stream at", OFFSET(segment_start_number), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, INT_MAX, E },
+    { "skip_to_segment", "first segment number to actually write", OFFSET(skip_to_segment), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, INT_MAX, E },
     { NULL },
 };
 

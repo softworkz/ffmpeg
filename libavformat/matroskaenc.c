@@ -21,6 +21,10 @@
 
 #include <stdint.h>
 
+//PLEX
+#include <stdlib.h>
+//PLEX
+
 #include "avc.h"
 #include "hevc.h"
 #include "avformat.h"
@@ -1377,7 +1381,13 @@ static int mkv_write_header(AVFormatContext *s)
     // reserve space for the duration
     mkv->duration = 0;
     mkv->duration_offset = avio_tell(pb);
-    put_ebml_void(pb, 11);                  // assumes double-precision float to be written
+    //PLEX
+    if (tag = av_dict_get(s->metadata, "plex.duration", NULL, 0)) {
+        put_ebml_float(pb, MATROSKA_ID_DURATION, strtod(tag->value, NULL) * 1000);
+    } else {
+        put_ebml_void(pb, 11);                  // assumes double-precision float to be written
+    }
+    //PLEX
     end_ebml_master(pb, segment_info);
 
     ret = mkv_write_tracks(s);
@@ -1677,6 +1687,13 @@ static int mkv_write_packet_internal(AVFormatContext *s, AVPacket *pkt, int add_
     int64_t ts = mkv->tracks[pkt->stream_index].write_dts ? pkt->dts : pkt->pts;
     int64_t relative_packet_pos;
     int dash_tracknum = mkv->is_dash ? mkv->dash_track_number : pkt->stream_index + 1;
+
+    //PLEX
+    if (ts == AV_NOPTS_VALUE && !mkv->tracks[pkt->stream_index].write_dts) {
+        mkv->tracks[pkt->stream_index].write_dts = 1;
+        ts = pkt->dts;
+    }
+    //PLEX
 
     if (ts == AV_NOPTS_VALUE) {
         av_log(s, AV_LOG_ERROR, "Can't write packet with unknown timestamp\n");

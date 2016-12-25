@@ -105,6 +105,11 @@
 
 #include "libavutil/avassert.h"
 
+//PLEX
+#include "plex.h"
+#include "libavformat/plex_http.h"
+//PLEX
+
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
 
@@ -220,12 +225,18 @@ static void sub2video_push_ref(InputStream *ist, int64_t pts)
                                      AV_BUFFERSRC_FLAG_PUSH);
 }
 
+//PLEX
+#include "libavfilter/lswsutils.h"
+//PLEX
+
 static void sub2video_update(InputStream *ist, AVSubtitle *sub)
 {
     int w = ist->sub2video.w, h = ist->sub2video.h;
+    int orig_w = w, orig_h = h, scaled = 0; //PLEX
+    double aspect; //PLEX
     AVFrame *frame = ist->sub2video.frame;
-    int8_t *dst;
-    int     dst_linesize;
+    int8_t *dst, *orig_dst; //PLEX
+    int     dst_linesize, orig_linesize; //PLEX
     int num_rects, i;
     int64_t pts, end_pts;
 
@@ -249,8 +260,61 @@ static void sub2video_update(InputStream *ist, AVSubtitle *sub)
     }
     dst          = frame->data    [0];
     dst_linesize = frame->linesize[0];
+    //PLEX
+    for (i = 0; i < num_rects; i++) {
+        if (sub->rects[i]->x + sub->rects[i]->w > w) {
+            w = sub->rects[i]->x + sub->rects[i]->w;
+            scaled = 1;
+        }
+        if (sub->rects[i]->y + sub->rects[i]->h > h) {
+            h = sub->rects[i]->y + sub->rects[i]->h;
+            scaled = 1;
+        }
+    }
+    if (scaled) {
+        if (orig_w > 200 && orig_h > 200) {
+            orig_w -= 20; orig_h -= 20;
+            dst += 10 * (4 + dst_linesize);
+        }
+        aspect = (double)w / (double)h;
+        if (orig_h * aspect > orig_w) {
+            int new_h = (double)orig_w / aspect;
+            dst += ((orig_h - new_h) / 2) * dst_linesize;
+            orig_h = new_h;
+        } else if (orig_h * aspect < orig_w) {
+            int new_w = (double)orig_h * aspect;
+            dst += ((orig_w - new_w) / 2) * 4;
+            orig_w = new_w;
+        }
+        orig_dst = dst;
+        orig_linesize = dst_linesize;
+        dst_linesize = w * 4;
+        dst = calloc(w * h, 4);
+        if (!dst) {
+            av_log(ist->dec_ctx, AV_LOG_ERROR,
+                "sub2video: Failed to allocate buffer.\n");
+            return;
+        }
+    }
+    //PLEX
     for (i = 0; i < num_rects; i++)
         sub2video_copy_rect(dst, dst_linesize, w, h, sub->rects[i]);
+    //PLEX
+    if (scaled) {
+        struct SwsContext *sws_ctx = sws_getContext(w, h, AV_PIX_FMT_RGB32,
+                                                    orig_w, orig_h, AV_PIX_FMT_RGB32,
+                                                    SWS_LANCZOS, NULL, NULL, NULL);
+        if (!sws_ctx) {
+            av_log(ist->dec_ctx, AV_LOG_ERROR,
+                "sub2video: Failed to allocate SwsContext.\n");
+            return;
+        }
+        sws_scale(sws_ctx, (const uint8_t * const*)&dst, &dst_linesize,
+                  0, h, (uint8_t * const*)&orig_dst, &orig_linesize);
+        sws_freeContext(sws_ctx);
+        free(dst);
+    }
+    //PLEX
     sub2video_push_ref(ist, pts);
     ist->sub2video.end_pts = end_pts;
 }
@@ -864,6 +928,7 @@ static void do_subtitle_out(AVFormatContext *s,
         pkt.size = subtitle_out_size;
         pkt.pts  = av_rescale_q(sub->pts, AV_TIME_BASE_Q, ost->st->time_base);
         pkt.duration = av_rescale_q(sub->end_display_time, (AVRational){ 1, 1000 }, ost->st->time_base);
+        pkt.flags |= AV_PKT_FLAG_KEY; //PLEX
         if (enc->codec_id == AV_CODEC_ID_DVB_SUBTITLE) {
             /* XXX: the pts correction is handled here. Maybe handling
                it in the codec would be better */
@@ -1412,8 +1477,13 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
     static int qp_histogram[52];
     int hours, mins, secs, us;
 
-    if (!print_stats && !is_last_report && !progress_avio)
+    if (!print_stats && !is_last_report && !progress_avio && !plexContext.progress_url) //PLEX
         return;
+
+//PLEX
+    static int64_t run_time = 0;
+    static int64_t start_time = 0;
+//PLEX
 
     if (!is_last_report) {
         if (last_time == -1) {
@@ -1422,7 +1492,14 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
         }
         if ((cur_time - last_time) < 500000)
             return;
-        last_time = cur_time;
+
+//PLEX
+       run_time = cur_time-last_time;
+       last_time = cur_time;
+
+       if (start_time == 0)
+           start_time = cur_time;
+//PLEX
     }
 
 
@@ -1505,6 +1582,61 @@ static void print_report(int is_last_report, int64_t timer_start, int64_t cur_ti
         if (is_last_report)
             nb_frames_drop += ost->last_droped;
     }
+
+//PLEX
+    if (pts != AV_NOPTS_VALUE) {
+        static int64_t last_pts = 0;
+        static int lastRemaining = 0;
+        // Notify about progress.
+        int64_t secs = pts / AV_TIME_BASE;
+        int64_t totalSecs = input_files[0]->ctx->duration / AV_TIME_BASE;
+        char url[4096];
+
+        if (plexContext.progress_url) {
+            // Compute speed of transcode as a multiple of real-time.
+            float speed = (float)(pts - last_pts) / (float)run_time;
+            // Compute estimated time remaining.
+            int remainingSecs = (totalSecs - secs) / speed;
+            int smoothedRemaining = remainingSecs;
+            if (lastRemaining != 0)
+                smoothedRemaining = lastRemaining*0.5 + remainingSecs*0.5;
+
+            // Sanity check.
+            if (smoothedRemaining < 0)
+                smoothedRemaining = -1;
+            // Only pass back speed if we're not throttled.
+            if (plexContext.throttle_delay == 0)
+                snprintf(url, sizeof(url),
+                         "%s?progress=%.1f&size=%lld&speed=%.1f&remaining=%d",
+                         plexContext.progress_url, (float)secs*100.0/totalSecs,
+                         total_size, speed, smoothedRemaining);
+            else
+                snprintf(url, sizeof(url),
+                         "%s?progress=%.1f&size=%lld&remaining=%d",
+                         plexContext.progress_url, (float)secs*100.0/totalSecs,
+                         total_size, smoothedRemaining);
+
+            char* reply = PMS_IssueHttpRequest(url, "PUT");
+
+            // Handle throttling.
+            if (strstr(reply, "canThrottle")) {
+                if (plexContext.throttle_delay == 0)
+                    PMS_Log(LOG_LEVEL_DEBUG, "Throttle - Going into sloth mode.");
+
+                plexContext.throttle_delay = 100;
+            } else {
+                if (plexContext.throttle_delay == 100)
+                    PMS_Log(LOG_LEVEL_DEBUG, "Throttle - Getting back to work.");
+
+                plexContext.throttle_delay = 0;
+            }
+
+            av_free(reply);
+            lastRemaining = remainingSecs;
+        }
+        last_pts = pts;
+    }
+//PLEX
 
     secs = pts / AV_TIME_BASE;
     us = pts % AV_TIME_BASE;
@@ -2377,6 +2509,10 @@ static int init_input_stream(int ist_index, char *error, int error_len)
         assert_avoptions(ist->decoder_opts);
     }
 
+//PLEX
+    plex_process_subtitle_header(ist);
+//PLEX
+
     ist->next_pts = AV_NOPTS_VALUE;
     ist->next_dts = AV_NOPTS_VALUE;
 
@@ -3054,6 +3190,20 @@ static int transcode_init(void)
     for (i = 0; i < nb_output_streams; i++) {
         ost = output_streams[i];
 
+//PLEX
+        AVCodecContext* codec = ost->st->codec;
+        if (codec && codec->codec_type == AVMEDIA_TYPE_VIDEO && codec->width && plexContext.progress_url)
+        {
+          // Compute real width/height based on storage aspect ratio.
+          int width = ceil((float)codec->width*(float)codec->sample_aspect_ratio.num/(float)codec->sample_aspect_ratio.den);
+
+          char url[1024];
+          sprintf(url, "%s?width=%d&height=%d", plexContext.progress_url, width, codec->height);
+  				char* reply = PMS_IssueHttpRequest(url, "PUT");
+  				av_free(reply);
+        }
+//PLEX
+
         if (ost->attachment_filename) {
             /* an attached file */
             av_log(NULL, AV_LOG_INFO, "  File %s -> Stream #%d:%d\n",
@@ -3615,6 +3765,11 @@ static int process_input(int file_index)
 
     sub2video_heartbeat(ist, pkt.pts);
 
+//PLEX
+    if (plex_process_subtitles(ist, &pkt))
+        goto discard_packet;
+//PLEX
+
     ret = process_input_packet(ist, &pkt);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "Error while decoding stream #%d:%d: %s\n",
@@ -3622,6 +3777,12 @@ static int process_input(int file_index)
         if (exit_on_error)
             exit_program(1);
     }
+
+//PLEX
+    // Delay if needed.
+    if (plexContext.throttle_delay > 0)
+      usleep(1000*plexContext.throttle_delay);
+//PLEX
 
 discard_packet:
     av_free_packet(&pkt);
@@ -3731,6 +3892,31 @@ static int transcode(void)
     OutputStream *ost;
     InputStream *ist;
     int64_t timer_start;
+
+//PLEX
+    {
+        AVFormatContext* ctx_input = input_files[0]->ctx;
+        AVFormatContext* ctx_output = output_files[0]->ctx;
+        char str[128];
+        int64_t start_time = input_files[0]->start_time;
+        if (start_time == AV_NOPTS_VALUE)
+            start_time = 0;
+
+        // Duration of the part we're transcoding.
+        sprintf(str, "%g", (ctx_input->duration - (copy_ts ? 0 : start_time)) / (double)AV_TIME_BASE);
+        av_dict_set(&ctx_output->metadata, "plex.duration", str, 0);
+
+        // Duration of the entire thing.
+        sprintf(str, "%g", (ctx_input->duration) / (double)AV_TIME_BASE);
+        av_dict_set(&ctx_output->metadata, "plex.total_duration", str, 0);
+
+        if (start_time)
+        {
+            sprintf(str, "%lld", start_time);
+            av_dict_set(&ctx_output->metadata, "plex.start_offset", str, 0);
+        }
+    }
+//PLEX
 
     ret = transcode_init();
     if (ret < 0)
@@ -3903,6 +4089,11 @@ int main(int argc, char **argv)
         argv++;
     }
 
+//PLEX
+    //do some sanity checks and maybe rewrite some of the parameters passed by the users
+    plex_init(&argc, &argv);
+//PLEX
+
     avcodec_register_all();
 #if CONFIG_AVDEVICE
     avdevice_register_all();
@@ -3936,6 +4127,8 @@ int main(int argc, char **argv)
 //         av_log(NULL, AV_LOG_FATAL, "At least one input file must be specified\n");
 //         exit_program(1);
 //     }
+
+    plex_feedback(input_files[0]->ctx); //PLEX
 
     current_time = ti = getutime();
     if (transcode() < 0)

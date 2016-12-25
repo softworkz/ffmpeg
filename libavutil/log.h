@@ -253,6 +253,7 @@ void av_vlog(void *avcl, int level, const char *fmt, va_list vl);
  * @return Current log level
  */
 int av_log_get_level(void);
+int av_log_get_level_plex(void); //PLEX
 
 /**
  * Set the log level
@@ -262,6 +263,7 @@ int av_log_get_level(void);
  * @param level Logging level
  */
 void av_log_set_level(int level);
+void av_log_set_level_plex(int); //PLEX
 
 /**
  * Set the logging callback
@@ -300,6 +302,8 @@ void av_log_default_callback(void *avcl, int level, const char *fmt,
  */
 const char* av_default_item_name(void* ctx);
 AVClassCategory av_default_get_category(void *ptr);
+
+typedef void (*av_log_set_level_fn)(int); //PLEX
 
 /**
  * Format a line of log the same way as the default callback.

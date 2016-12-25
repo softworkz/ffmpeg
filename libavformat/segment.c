@@ -68,6 +68,7 @@ typedef enum {
 typedef struct {
     const AVClass *class;  /**< Class for private options. */
     int segment_idx;       ///< index of the segment file to write, starting from 0
+    int first_segment_idx; ///< PLEX First segment number
     int segment_idx_wrap;  ///< number after which the index wraps
     int segment_idx_wrap_nb;  ///< number of time the index has wraped
     int segment_count;     ///< number of segment files already written
@@ -113,6 +114,12 @@ typedef struct {
     SegmentListEntry cur_entry;
     SegmentListEntry *segment_list_entries;
     SegmentListEntry *segment_list_entries_end;
+
+    int is_first_pkt;      ///< tells if it is the first packet in the segment
+    int force_split;       ///< PLEX
+    int segment_copyts;    ///< PLEX
+    int dup_edges;         ///< PLEX; determines if we should duplicate packets
+                           ///        that cross segment boundaries
 } SegmentContext;
 
 static void print_csv_escaped_str(AVIOContext *ctx, const char *str)
@@ -196,6 +203,12 @@ static int set_segment_filename(AVFormatContext *s)
     snprintf(seg->cur_entry.filename, size, "%s%s",
              seg->entry_prefix ? seg->entry_prefix : "",
              av_basename(oc->filename));
+
+    // PLEX
+    // Write segment data to temp file, so we don't accidentally grab a partial segment.
+    if(!seg->list)
+      av_strlcatf(oc->filename, sizeof(oc->filename), ".tmp");
+    // PLEX
 
     return 0;
 }
@@ -366,6 +379,18 @@ static int segment_end(AVFormatContext *s, int write_trailer, int is_last)
 
 end:
     avio_close(oc->pb);
+
+    // PLEX
+
+    // Now rename the temporary file.
+    if (!seg->list) {
+        char* final_filename = av_strdup(oc->filename);
+        final_filename[strlen(final_filename)-4] = '\0';
+        rename(oc->filename, final_filename);
+        av_free(final_filename);
+    }
+
+    // PLEX
 
     return ret;
 }
@@ -572,9 +597,18 @@ static int seg_write_header(AVFormatContext *s)
     int ret;
     int i;
 
+    //PLEX
+    seg->force_split = 0;
+    //PLEX
+
     seg->segment_count = 0;
     if (!seg->write_header_trailer)
         seg->individual_header_trailer = 0;
+
+    //PLEX
+    if (seg->segment_copyts)
+        seg->segment_count = seg->segment_idx;
+    //PLEX
 
     if (!!seg->time_str + !!seg->times_str + !!seg->frames_str > 1) {
         av_log(s, AV_LOG_ERROR,
@@ -785,6 +819,11 @@ static int seg_write_packet(AVFormatContext *s, AVPacket *pkt)
            av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base),
            av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, &st->time_base));
 
+//PLEX
+    int64_t pts_orig = pkt->pts,
+            dts_orig = pkt->pts;
+//PLEX
+
     /* compute new timestamps */
     offset = av_rescale_q(seg->initial_offset - (seg->reset_timestamps ? seg->cur_entry.start_pts : 0),
                           AV_TIME_BASE_Q, st->time_base);
@@ -796,6 +835,23 @@ static int seg_write_packet(AVFormatContext *s, AVPacket *pkt)
     av_log(s, AV_LOG_DEBUG, " -> pts:%s pts_time:%s dts:%s dts_time:%s\n",
            av_ts2str(pkt->pts), av_ts2timestr(pkt->pts, &st->time_base),
            av_ts2str(pkt->dts), av_ts2timestr(pkt->dts, &st->time_base));
+
+    //PLEX
+    if (seg->dup_edges &&
+        av_compare_ts(pts_orig + pkt->duration, st->time_base,
+                        end_pts-seg->time_delta, AV_TIME_BASE_Q) >= 0) {
+        AVPacket new_packet;
+        av_copy_packet(&new_packet, pkt);
+        new_packet.pts = pts_orig;
+        new_packet.dts = dts_orig;
+        ff_write_chained(seg->avf, pkt->stream_index, pkt, s, seg->initial_offset || seg->reset_timestamps);
+        seg->force_split = 1;
+        seg_write_packet(s, &new_packet);
+        seg->force_split = 0;
+        av_free_packet(&new_packet);
+        goto fail;
+    }
+    //PLEX
 
     ret = ff_write_chained(seg->avf, pkt->stream_index, pkt, s, seg->initial_offset || seg->reset_timestamps);
 
@@ -876,6 +932,8 @@ static const AVOption options[] = {
     { "segment_list_entry_prefix", "set base url prefix for segments", OFFSET(entry_prefix), AV_OPT_TYPE_STRING,  {.str = NULL}, 0, 0, E },
     { "segment_start_number", "set the sequence number of the first segment", OFFSET(segment_idx), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, E },
     { "segment_wrap_number", "set the number of wrap before the first segment", OFFSET(segment_idx_wrap_nb), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, E },
+    { "segment_copyts",    "adjust timestamps for -copyts setting",      OFFSET(segment_copyts), AV_OPT_TYPE_INT,   {.i64 = 0}, 0, 1,       E }, //PLEX
+    { "segmet_dup_edges",  "duplicate packets that cross segment boundaries", OFFSET(dup_edges), AV_OPT_TYPE_INT,   {.i64 = 0}, 0, 1,       E }, //PLEX
 
     { "individual_header_trailer", "write header/trailer to each segment", OFFSET(individual_header_trailer), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, E },
     { "write_header_trailer", "write a header to the first segment and a trailer to the last one", OFFSET(write_header_trailer), AV_OPT_TYPE_INT, {.i64 = 1}, 0, 1, E },
